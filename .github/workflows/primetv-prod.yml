@@ -1,0 +1,87 @@
+name: Prime TV Production CD
+
+on:
+  push:
+    branches: [prime-tv]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Generate .env.local
+        run: |
+          echo "NEXT_PUBLIC_API_URL=https://api.theprimetv.com/api/v1/{{scope}}" >> .env.local
+          echo "NEXT_PUBLIC_WEB_HOST_URL=https://panel.theprimetv.com" >> .env.local
+          echo "NEXT_PUBLIC_WEB_IDENTIFIER=en" >> .env.local
+          echo "NEXT_PUBLIC_WEB_MODE=production" >> .env.local
+          echo "NEXT_PUBLIC_ENABLE_RBAC=true" >> .env.local
+        env:
+          PORT: 5009
+          NODE_ENV: production
+
+      - name: Copy files to VPS (SCP)
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.PRODUCTION_HOST }}
+          username: ${{ secrets.PRODUCTION_SERVER_USERNAME }}
+          key: ${{ secrets.PRODUCTION_SERVER_SSH_PRIVATE_KEY }}
+          source: './'
+          target: '/home/pitech/deployed-services/primetv-panel-prod'
+          rm: true
+
+      - name: Deploy via SSH (Docker)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PRODUCTION_HOST }}
+          username: ${{ secrets.PRODUCTION_SERVER_USERNAME }}
+          key: ${{ secrets.PRODUCTION_SERVER_SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+
+            APP_DIR=/home/pitech/deployed-services/primetv-panel-prod
+            IMAGE_NAME=primetv-panel-prod
+            NEW_CONTAINER=primetv-panel-prod-new
+            OLD_CONTAINER=primetv-panel-prod
+
+            cd $APP_DIR
+
+            echo "🐳 Building Docker image..."
+            docker build -t $IMAGE_NAME:latest .
+
+            echo "🚀 Starting NEW container on port 5010..."
+            docker run -d \
+              --name $NEW_CONTAINER \
+              --network docker_docker_net \
+              -p 5010:5009 \
+              -e NODE_ENV=production \
+              $IMAGE_NAME:latest
+
+            echo "⏳ Waiting for app to boot..."
+            sleep 10
+
+            echo "🔍 Verifying new container..."
+            docker ps | grep $NEW_CONTAINER
+
+            echo "🛑 Stopping OLD container..."
+            docker stop $OLD_CONTAINER || true
+            docker rm $OLD_CONTAINER || true
+
+            echo "🔁 Switching to production container (port 5009)..."
+            docker stop $NEW_CONTAINER
+            docker rm $NEW_CONTAINER
+
+            docker run -d \
+              --name $OLD_CONTAINER \
+              --network docker_docker_net \
+              -p 5009:5009 \
+              --restart always \
+              -e NODE_ENV=production \
+              $IMAGE_NAME:latest
+
+            echo "🧹 Cleaning up..."
+            docker image prune -f
+
+            echo "✅ Deploy complete (near zero downtime)"
